@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import math
 
+from typing import Optional
+
 import torch
 from torch import Tensor
 
@@ -45,14 +47,16 @@ class LeaveOneOutPseudoLikelihood(ExactMarginalLogLikelihood):
         self.likelihood = likelihood
         self.model = model
 
-    def forward(self, function_dist: MultivariateNormal, target: Tensor, *params) -> Tensor:
+    def forward(self, function_dist: MultivariateNormal, target: Tensor, *params, weights: Optional[Tensor] = None) -> Tensor:
         r"""
         Computes the leave one out likelihood given :math:`p(\mathbf f)` and :math:`\mathbf y`
 
         :param ~gpytorch.distributions.MultivariateNormal output: the outputs of the latent function
             (the :obj:`~gpytorch.models.GP`)
-        :param torch.Tensor target: :math:`\mathbf y` The target values
+        :param torch.Tensor target: :math:`\mathbf y` The target values.
         :param dict kwargs: Additional arguments to pass to the likelihood's forward function.
+        :param torch.Tensor weights: Tensor specifying the weight for each training data point
+            (if omitted, uses uniform weights).
         """
         output = self.likelihood(function_dist, *params)
         m, L = output.mean, output.lazy_covariance_matrix.cholesky(upper=False)
@@ -62,8 +66,10 @@ class LeaveOneOutPseudoLikelihood(ExactMarginalLogLikelihood):
         mu = target - L._cholesky_solve((target - m).unsqueeze(-1), upper=False).squeeze(-1) * sigma2
         term1 = -0.5 * sigma2.log()
         term2 = -0.5 * (target - mu).pow(2.0) / sigma2
-        res = (term1 + term2).sum(dim=-1)
-
+        res = term1 + term2
+        if weights is not None:
+            res = res * weights
+        res = res.sum(dim=-1)
         res = self._add_other_terms(res, params)
 
         # Scale by the amount of data we have and then add on the scaled constant
