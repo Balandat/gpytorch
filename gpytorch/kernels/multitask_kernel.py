@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
+from itertools import repeat
 from typing import Optional
 
 from linear_operator import to_linear_operator
 from linear_operator.operators import KroneckerProductLinearOperator
+from torch import broadcast_shapes, Size
 
 from ..priors import Prior
 from .index_kernel import IndexKernel
@@ -33,10 +35,21 @@ class MultitaskKernel(Kernel):
         num_tasks: int,
         rank: Optional[int] = 1,
         task_covar_prior: Optional[Prior] = None,
+        batch_shape: Optional[Size] = None,
         **kwargs,
     ):
         """"""
-        super(MultitaskKernel, self).__init__(**kwargs)
+        if batch_shape is None:
+                batch_shape = data_covar_module.batch_shape
+        else:
+            try:
+                broadcast_shapes(batch_shape, data_covar_module.batch_shape)
+            except RuntimeError:
+                raise ValueError(
+                    f"{batch_shape=} incompatible with {data_covar_module.batch_shape=}"
+                )
+
+        super(MultitaskKernel, self).__init__(batch_shape=batch_shape, **kwargs)
         self.task_covar_module = IndexKernel(
             num_tasks=num_tasks, batch_shape=self.batch_shape, rank=rank, prior=task_covar_prior
         )
@@ -46,11 +59,16 @@ class MultitaskKernel(Kernel):
     def forward(self, x1, x2, diag=False, last_dim_is_batch=False, **params):
         if last_dim_is_batch:
             raise RuntimeError("MultitaskKernel does not accept the last_dim_is_batch argument.")
-        covar_i = self.task_covar_module.covar_matrix
-        if len(x1.shape[:-2]):
-            covar_i = covar_i.repeat(*x1.shape[:-2], 1, 1)
-        covar_x = to_linear_operator(self.data_covar_module.forward(x1, x2, **params))
-        res = KroneckerProductLinearOperator(covar_x, covar_i)
+
+        data_covar = to_linear_operator(self.data_covar_module(x1, x2, **params))
+        task_covar = self.task_covar_module.covar_matrix
+        batch_shape = broadcast_shapes(
+            self.batch_shape, task_covar.shape[:-2], data_covar.shape[:-2],
+        )
+        res = KroneckerProductLinearOperator(
+            data_covar.expand(*batch_shape, *data_covar.shape[-2:]),
+            task_covar.expand(*batch_shape, *task_covar.shape[-2:]),
+        )
         return res.diagonal(dim1=-1, dim2=-2) if diag else res
 
     def num_outputs_per_input(self, x1, x2):
